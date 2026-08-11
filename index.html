@@ -74,14 +74,15 @@
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="static/supabase.min.js"></script>
   <script>
-    window.journeySupabase=window.supabase.createClient('https://aevoxzippmtipliacssb.supabase.co','sb_publishable_w39rFG2ut8KrRgtVaIgJtA_FpXj7rkV',{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'pkce'}});
+    window.journeySupabase=window.supabase.createClient('https://aevoxzippmtipliacssb.supabase.co','sb_publishable_w39rFG2ut8KrRgtVaIgJtA_FpXj7rkV',{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,flowType:'pkce'}});
+    window.journeyAuthReady=(async()=>{const code=new URLSearchParams(location.search).get('code');if(code){const{error}=await window.journeySupabase.auth.exchangeCodeForSession(code);if(error)throw error;history.replaceState({},document.title,location.pathname)}return window.journeySupabase.auth.getSession()})();
     window.journeyGoogleLogin=async button=>{const errorBox=document.querySelector('#auth-error');button.disabled=true;button.textContent='正在前往 Google…';errorBox.textContent='';try{const{error}=await window.journeySupabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:'https://chengyunhou3-bit.github.io/journey-p-public/'}});if(error)throw error}catch(error){errorBox.textContent=`登入失敗：${error.message}`;button.disabled=false;button.textContent='使用 Google 登入'}};
   </script>
   <script>
     (async()=>{
     const supabaseClient=window.journeySupabase;
     const authGate=document.querySelector('#auth-gate'),authError=document.querySelector('#auth-error'),accountBar=document.querySelector('#account-bar');
-    const{data:{session}}=await supabaseClient.auth.getSession();
+    const{data:{session}}=await window.journeyAuthReady;
     if(session){
     const userId=session.user.id,userEmail=session.user.email||'Google 玩家';authGate.classList.add('is-hidden');accountBar.classList.remove('is-hidden');document.querySelector('#account-email').textContent=userEmail;document.querySelector('#logout-button').addEventListener('click',async()=>{await supabaseClient.auth.signOut();location.reload()});
     const nameStorageKey=`journeyP.${userId}.characterName`,questKey=`journeyP.${userId}.dailyQuests`,progressKey=`journeyP.${userId}.playerProgress.v1`,journalKey=`journeyP.${userId}.characterJournal`;
