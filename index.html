@@ -50,7 +50,7 @@
   </style>
 </head>
 <body>
-  <section class="auth-gate" id="auth-gate"><div class="auth-card"><div class="auth-crest">🧭</div><h1>JOURNEY P</h1><p>每一天，都是旅程的一部分。<br>使用 Google 帳號開啟你的冒險紀錄。</p><button class="google-login" id="google-login" type="button">使用 Google 登入</button><div class="auth-error" id="auth-error"></div></div></section><div class="account-bar is-hidden" id="account-bar"><span id="account-email"></span><button class="logout-button" id="logout-button" type="button">登出</button></div>
+  <section class="auth-gate" id="auth-gate"><div class="auth-card"><div class="auth-crest">🧭</div><h1>JOURNEY P</h1><p>每一天，都是旅程的一部分。<br>使用 Google 帳號開啟你的冒險紀錄。</p><button class="google-login" id="google-login" type="button" onclick="journeyGoogleLogin(this)">使用 Google 登入</button><div class="auth-error" id="auth-error"></div></div></section><div class="account-bar is-hidden" id="account-bar"><span id="account-email"></span><button class="logout-button" id="logout-button" type="button">登出</button></div>
   <aside class="wood-menu" aria-label="主要選單"><button class="wood-slot" id="quest-menu" type="button">QUEST</button><button class="wood-slot" type="button">SKILLS</button><button class="wood-slot" type="button">信仰&amp;真實</button><button class="wood-slot" id="journal-menu" type="button">角色日誌</button><button class="wood-slot" id="mail-menu" type="button">查看信箱</button></aside>
   <main class="shell"><div class="inner"><div class="title-wrap"><div class="clock-panel" aria-label="目前時間，24 小時制"><span class="clock-time" id="digital-clock">00:00:00</span></div><div class="title" id="page-title">角色狀態</div></div>
     <div class="grid view" id="character-view">
@@ -74,10 +74,13 @@
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="static/supabase.min.js"></script>
   <script>
+    window.journeySupabase=window.supabase.createClient('https://aevoxzippmtipliacssb.supabase.co','sb_publishable_w39rFG2ut8KrRgtVaIgJtA_FpXj7rkV',{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true,flowType:'pkce'}});
+    window.journeyGoogleLogin=async button=>{const errorBox=document.querySelector('#auth-error');button.disabled=true;button.textContent='正在前往 Google…';errorBox.textContent='';try{const{error}=await window.journeySupabase.auth.signInWithOAuth({provider:'google',options:{redirectTo:'https://chengyunhou3-bit.github.io/journey-p-public/'}});if(error)throw error}catch(error){errorBox.textContent=`登入失敗：${error.message}`;button.disabled=false;button.textContent='使用 Google 登入'}};
+  </script>
+  <script>
     (async()=>{
-    const supabaseClient=window.supabase.createClient('https://aevoxzippmtipliacssb.supabase.co','sb_publishable_w39rFG2ut8KrRgtVaIgJtA_FpXj7rkV',{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
-    const authGate=document.querySelector('#auth-gate'),authError=document.querySelector('#auth-error'),accountBar=document.querySelector('#account-bar'),googleLogin=document.querySelector('#google-login');
-    googleLogin.addEventListener('click',async()=>{googleLogin.disabled=true;googleLogin.textContent='正在前往 Google…';authError.textContent='';const{error}=await supabaseClient.auth.signInWithOAuth({provider:'google',options:{redirectTo:'https://chengyunhou3-bit.github.io/journey-p-public/'}});if(error){authError.textContent=`登入失敗：${error.message}`;googleLogin.disabled=false;googleLogin.textContent='使用 Google 登入'}});
+    const supabaseClient=window.journeySupabase;
+    const authGate=document.querySelector('#auth-gate'),authError=document.querySelector('#auth-error'),accountBar=document.querySelector('#account-bar');
     const{data:{session}}=await supabaseClient.auth.getSession();
     if(session){
     const userId=session.user.id,userEmail=session.user.email||'Google 玩家';authGate.classList.add('is-hidden');accountBar.classList.remove('is-hidden');document.querySelector('#account-email').textContent=userEmail;document.querySelector('#logout-button').addEventListener('click',async()=>{await supabaseClient.auth.signOut();location.reload()});
