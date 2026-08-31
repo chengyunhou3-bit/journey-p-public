@@ -67,9 +67,14 @@
       <div class="edit-footer"><button class="button" id="editor-cancel" type="button">取消</button><button class="button save" type="submit">儲存更改</button></div>
     </form>
   </dialog>
+  <script src="static/supabase.min.js"></script>
   <script>
-    const activeUserId=sessionStorage.getItem('journeyP.activeUserId');
-    if(!activeUserId){location.replace('app.html');throw new Error('尚未確認公開版登入使用者')}
+  (async()=>{
+    const supabaseClient=window.supabase.createClient('https://aevoxzippmtipliacssb.supabase.co','sb_publishable_w39rFG2ut8KrRgtVaIgJtA_FpXj7rkV',{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,flowType:'pkce'}});
+    const{data:{user},error:userError}=await supabaseClient.auth.getUser();
+    if(userError||!user){location.replace('app.html');throw userError||new Error('尚未登入')}
+    const activeUserId=user.id;
+    sessionStorage.setItem('journeyP.activeUserId',activeUserId);
     const scopedKey=suffix=>`journeyP.${activeUserId}.${suffix}`;
     const QUEST_KEY=scopedKey('dailyQuests');
     const PLANNER_KEY=scopedKey('weeklyPlanner.v1');
@@ -79,6 +84,8 @@
     const CATEGORY_KEY=scopedKey('calendar.categories.v1');
     const COLOR_KEY=scopedKey('calendar.colors.v1');
     const NAMED_PLANNER_ITEMS_PREFIX=scopedKey('namedPlannerItems.v1.');
+    const CLOUD_MIGRATION_KEY=scopedKey('calendarCloudMigrated.v1');
+    const CLOUD_TABLE='calendar_states';
     const DEFAULT_CATEGORIES=[{id:'work',name:'工作',color:'#6e9a67'},{id:'study',name:'學習',color:'#5688bd'},{id:'growth',name:'個人成長',color:'#8d68a5'},{id:'life',name:'生活',color:'#c89542'},{id:'health',name:'健康',color:'#b85f68'}];
     const dayNames=['週一','週二','週三','週四','週五','週六','週日'];
     const hours=[...Array.from({length:19},(_,index)=>index+5),0,1,2,3];
@@ -100,13 +107,31 @@
     let namedPlanners=[];
     let activePlannerId=localStorage.getItem(ACTIVE_PLANNER_KEY)||'weekly';
     let categories=[];
+    let cloudReady=false;
+    let cloudSyncTimer=null;
+    let cloudSyncPromise=Promise.resolve();
+    let lastCloudUpdatedAt='';
 
     const readArray=key=>{try{const value=JSON.parse(localStorage.getItem(key)||'[]');return Array.isArray(value)?value:[]}catch{return[]}};
     const writeArray=(key,value)=>localStorage.setItem(key,JSON.stringify(value));
     const plannerItemsKey=id=>`${NAMED_PLANNER_ITEMS_PREFIX}${id}`;
     const writePlannerSnapshot=(key,value)=>{const next=JSON.stringify(value),previous=localStorage.getItem(key);if(previous&&previous!==next){let backups=[];try{const parsed=JSON.parse(localStorage.getItem(`${key}.backups`)||'[]');backups=Array.isArray(parsed)?parsed:[]}catch{}try{backups.unshift({savedAt:new Date().toISOString(),items:JSON.parse(previous)});localStorage.setItem(`${key}.backups`,JSON.stringify(backups.slice(0,8)))}catch{}}localStorage.setItem(key,next)};
+    const arrayValue=value=>Array.isArray(value)?value:[];
+    const objectValue=value=>value&&typeof value==='object'&&!Array.isArray(value)?value:{};
+    const mergeById=(primary,secondary)=>{const result=[],seen=new Set();for(const item of [...arrayValue(primary),...arrayValue(secondary)]){if(!item||typeof item!=='object')continue;const key=String(item.id??JSON.stringify(item));if(seen.has(key))continue;seen.add(key);result.push(item)}return result};
+    const normalizeCloudState=value=>{const state=objectValue(value),namedPlannerItems={};for(const[key,items]of Object.entries(objectValue(state.namedPlannerItems)))namedPlannerItems[key]=arrayValue(items);return{schemaVersion:1,weeklyItems:arrayValue(state.weeklyItems),customTasks:arrayValue(state.customTasks),namedPlanners:arrayValue(state.namedPlanners).filter(item=>item&&item.id&&item.title),namedPlannerItems,activePlannerId:typeof state.activePlannerId==='string'?state.activePlannerId:'weekly',categories:arrayValue(state.categories)}};
+    const collectLocalState=()=>{const namedPlannerItems={};for(const planner of namedPlanners)namedPlannerItems[planner.id]=readArray(plannerItemsKey(planner.id));return normalizeCloudState({weeklyItems:readArray(PLANNER_KEY),customTasks:readArray(CUSTOM_KEY),namedPlanners:namedPlanners.map(({id,title})=>({id,title})),namedPlannerItems,activePlannerId,categories})};
+    const hasMeaningfulLocalState=state=>state.weeklyItems.length>0||state.customTasks.length>0||state.namedPlanners.length>0||Object.values(state.namedPlannerItems).some(items=>items.length>0)||JSON.stringify(state.categories.map(({name,color})=>({name,color})))!==JSON.stringify(DEFAULT_CATEGORIES.map(({name,color})=>({name,color})));
+    const mergeCloudAndLegacy=(cloud,legacy)=>{const namedPlanners=mergeById(cloud.namedPlanners,legacy.namedPlanners),namedPlannerItems={};for(const key of new Set([...Object.keys(cloud.namedPlannerItems),...Object.keys(legacy.namedPlannerItems)]))namedPlannerItems[key]=mergeById(cloud.namedPlannerItems[key],legacy.namedPlannerItems[key]);const candidateActive=legacy.activePlannerId==='weekly'||namedPlanners.some(item=>String(item.id)===String(legacy.activePlannerId))?legacy.activePlannerId:cloud.activePlannerId;return normalizeCloudState({weeklyItems:mergeById(cloud.weeklyItems,legacy.weeklyItems),customTasks:mergeById(cloud.customTasks,legacy.customTasks),namedPlanners,namedPlannerItems,activePlannerId:candidateActive,categories:cloud.categories.length?cloud.categories:legacy.categories})};
+    const setSyncStatus=(text,saving=false)=>{const status=document.querySelector('#autosave-status');status.classList.toggle('saving',saving);status.textContent=text};
+    const applyCloudState=state=>{const normalized=normalizeCloudState(state);writePlannerSnapshot(PLANNER_KEY,normalized.weeklyItems);writeArray(CUSTOM_KEY,normalized.customTasks);writeArray(NAMED_PLANNERS_KEY,normalized.namedPlanners);for(const planner of normalized.namedPlanners)writePlannerSnapshot(plannerItemsKey(planner.id),normalized.namedPlannerItems[planner.id]||[]);if(normalized.categories.length)writeArray(CATEGORY_KEY,normalized.categories);const validActive=normalized.activePlannerId==='weekly'||normalized.namedPlanners.some(item=>String(item.id)===String(normalized.activePlannerId));localStorage.setItem(ACTIVE_PLANNER_KEY,validActive?normalized.activePlannerId:'weekly');customTasks=readArray(CUSTOM_KEY);namedPlanners=readArray(NAMED_PLANNERS_KEY).filter(item=>item&&item.id&&item.title);activePlannerId=localStorage.getItem(ACTIVE_PLANNER_KEY)||'weekly';loadCalendarOptions();loadPlannerItems()};
+    const persistCloudState=async state=>{const updatedAt=new Date().toISOString(),{data,error}=await supabaseClient.from(CLOUD_TABLE).upsert({user_id:activeUserId,state:normalizeCloudState(state),updated_at:updatedAt},{onConflict:'user_id'}).select('state,updated_at').single();if(error)throw error;lastCloudUpdatedAt=data.updated_at||updatedAt;return data};
+    const flushCloudState=async()=>{setSyncStatus('雲端儲存中…',true);await persistCloudState(collectLocalState());setSyncStatus('☁ 已同步')};
+    const queueCloudSync=()=>{if(!cloudReady)return;clearTimeout(cloudSyncTimer);setSyncStatus('等待同步…',true);cloudSyncTimer=setTimeout(()=>{cloudSyncTimer=null;cloudSyncPromise=cloudSyncPromise.then(flushCloudState).catch(error=>{console.error('Calendar cloud sync failed',error);setSyncStatus('⚠ 僅存本機');showToast('雲端同步失敗，本機資料仍已保留')})},450)};
+    const refreshCloudState=async()=>{if(!cloudReady||cloudSyncTimer)return;await cloudSyncPromise;const{data,error}=await supabaseClient.from(CLOUD_TABLE).select('state,updated_at').eq('user_id',activeUserId).maybeSingle();if(error||!data||data.updated_at===lastCloudUpdatedAt)return;applyCloudState(data.state);lastCloudUpdatedAt=data.updated_at||'';renderWeek();setSyncStatus('☁ 已同步');showToast('已載入其他裝置的最新行程')};
+    const initializeCloudSync=async()=>{setSyncStatus('連接雲端…',true);const legacyState=collectLocalState();try{const{data,error}=await supabaseClient.from(CLOUD_TABLE).select('state,updated_at').eq('user_id',activeUserId).maybeSingle();if(error)throw error;const migrationPending=localStorage.getItem(CLOUD_MIGRATION_KEY)!=='done';let finalState=data?normalizeCloudState(data.state):legacyState;if(data&&migrationPending&&hasMeaningfulLocalState(legacyState))finalState=mergeCloudAndLegacy(finalState,legacyState);if(!data||JSON.stringify(finalState)!==JSON.stringify(normalizeCloudState(data.state)))await persistCloudState(finalState);else lastCloudUpdatedAt=data.updated_at||'';applyCloudState(finalState);localStorage.setItem(CLOUD_MIGRATION_KEY,'done');cloudReady=true;setSyncStatus('☁ 已同步')}catch(error){console.error('Calendar cloud initialization failed',error);cloudReady=true;setSyncStatus('⚠ 僅存本機');showToast('目前無法連接雲端，行程已保留在這台裝置')}};
     const loadCalendarOptions=()=>{const saved=readArray(CATEGORY_KEY),legacyColors=readArray(COLOR_KEY);if(saved.some(item=>item&&typeof item==='object'&&item.name)){categories=saved.filter(item=>item&&item.name&&/^#[0-9a-f]{6}$/i.test(item.color)).map((item,index)=>({id:item.id||`category-${Date.now()}-${index}`,name:String(item.name).trim(),color:item.color.toLowerCase()}))}else if(saved.some(item=>typeof item==='string')){categories=saved.filter(item=>typeof item==='string'&&item.trim()).map((name,index)=>({id:`category-${Date.now()}-${index}`,name:name.trim(),color:legacyColors[index]?.value||DEFAULT_CATEGORIES.find(item=>item.name===name)?.color||DEFAULT_CATEGORIES[index%DEFAULT_CATEGORIES.length].color}))}else categories=DEFAULT_CATEGORIES.map(item=>({...item}));if(!categories.length)categories=DEFAULT_CATEGORIES.map(item=>({...item}))};
-    const saveCalendarOptions=()=>writeArray(CATEGORY_KEY,categories);
+    const saveCalendarOptions=()=>{writeArray(CATEGORY_KEY,categories);queueCloudSync()};
     loadCalendarOptions();    customTasks=readArray(CUSTOM_KEY);
     namedPlanners=readArray(NAMED_PLANNERS_KEY).filter(item=>item&&item.id&&item.title);
     if(activePlannerId!=='weekly'&&!namedPlanners.some(item=>item.id===activePlannerId))activePlannerId='weekly';
@@ -117,10 +142,10 @@
     const activePlanner=()=>namedPlanners.find(item=>item.id===activePlannerId)||null;
     const activeTitle=()=>isWeekly()?'每週旅程規劃':activePlanner()?.title||'未命名行程';
     const loadPlannerItems=()=>{plannerItems=readArray(isWeekly()?PLANNER_KEY:plannerItemsKey(activePlannerId))};
-    const saveNamedPlanners=()=>writeArray(NAMED_PLANNERS_KEY,namedPlanners.map(({id,title})=>({id,title})));
+    const saveNamedPlanners=()=>{writeArray(NAMED_PLANNERS_KEY,namedPlanners.map(({id,title})=>({id,title})));queueCloudSync()};
     const migrateNamedPlannerItems=()=>{let migrated=false;for(const planner of namedPlanners){const key=plannerItemsKey(planner.id);if(localStorage.getItem(key)===null&&Array.isArray(planner.items)){writeArray(key,planner.items);migrated=true}if(Object.prototype.hasOwnProperty.call(planner,'items')){delete planner.items;migrated=true}}if(migrated)saveNamedPlanners()};
-    const savePlanner=()=>{const status=document.querySelector('#autosave-status');status.classList.add('saving');status.textContent='儲存中…';writePlannerSnapshot(isWeekly()?PLANNER_KEY:plannerItemsKey(activePlannerId),plannerItems);status.classList.remove('saving');status.textContent='✓ 已自動儲存';renderLoad()};
-    const saveCustomTasks=()=>writeArray(CUSTOM_KEY,customTasks);
+    const savePlanner=()=>{writePlannerSnapshot(isWeekly()?PLANNER_KEY:plannerItemsKey(activePlannerId),plannerItems);queueCloudSync();renderLoad()};
+    const saveCustomTasks=()=>{writeArray(CUSTOM_KEY,customTasks);queueCloudSync()};
     const zonedToday=()=>{const parts=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).filter(part=>part.type!=='literal').map(part=>[part.type,part.value]));return new Date(Date.UTC(Number(parts.year),Number(parts.month)-1,Number(parts.day),12))};
     const mondayForWeek=()=>{const date=zonedToday(),day=date.getUTCDay()||7;date.setUTCDate(date.getUTCDate()-day+1+weekOffset*7);return date};
     const dateKey=date=>`${date.getUTCFullYear()}-${String(date.getUTCMonth()+1).padStart(2,'0')}-${String(date.getUTCDate()).padStart(2,'0')}`;
@@ -154,7 +179,7 @@
 
     const renderCalendarSettings=()=>{const categoryList=document.querySelector('#category-list');categoryList.innerHTML=categories.map((category,index)=>`<div class="setting-item"><input class="setting-swatch" type="color" value="${escapeHtml(category.color)}" data-category-color="${index}" aria-label="${escapeHtml(category.name)}的顏色"><span>${escapeHtml(category.name)}</span><button class="setting-remove" type="button" data-category-index="${index}" title="刪除類別">×</button></div>`).join('');categoryList.querySelectorAll('[data-category-color]').forEach(input=>input.addEventListener('change',()=>{const category=categories[Number(input.dataset.categoryColor)];category.color=input.value.toLowerCase();for(const item of plannerItems)if(item.category===category.name)item.color=category.color;saveCalendarOptions();savePlanner();renderWeek();showToast(`「${category.name}」顏色已更新`)}));categoryList.querySelectorAll('[data-category-index]').forEach(button=>button.addEventListener('click',()=>{if(categories.length<=1){showToast('至少要保留一個類別');return}const category=categories[Number(button.dataset.categoryIndex)];if(!confirm(`刪除類別「${category.name}」？\n既有行程不會刪除，下次編輯時可重新選擇類別。`))return;categories.splice(Number(button.dataset.categoryIndex),1);saveCalendarOptions();renderCalendarSettings()}))};
     const openCalendarSettings=()=>{renderCalendarSettings();settingsDialog.showModal();setTimeout(()=>document.querySelector('#category-name').focus(),0)};
-    const activatePlanner=id=>{activePlannerId=id;localStorage.setItem(ACTIVE_PLANNER_KEY,id);weekOffset=0;loadPlannerItems();plannerDialog.close();renderWeek();showToast(`已開啟：${activeTitle()}`)};
+    const activatePlanner=id=>{activePlannerId=id;localStorage.setItem(ACTIVE_PLANNER_KEY,id);weekOffset=0;loadPlannerItems();queueCloudSync();plannerDialog.close();renderWeek();showToast(`已開啟：${activeTitle()}`)};
     const renderPlannerLibrary=()=>{const list=document.querySelector('#planner-list');const weekly=`<div class="planner-row"><button class="planner-open${isWeekly()?' active':''}" data-planner="weekly" type="button"><span><strong>每週旅程規劃</strong><small>依實際日期排列的週曆</small></span><span>›</span></button><span></span></div>`;const named=namedPlanners.map(planner=>`<div class="planner-row"><button class="planner-open${planner.id===activePlannerId?' active':''}" data-planner="${escapeHtml(planner.id)}" type="button"><span><strong>${escapeHtml(planner.title)}</strong><small>無日期 · 週一至週日</small></span><span>›</span></button><button class="planner-delete" data-delete="${escapeHtml(planner.id)}" type="button" title="刪除行程">×</button></div>`).join('');list.innerHTML=weekly+named;list.querySelectorAll('[data-planner]').forEach(button=>button.addEventListener('click',()=>activatePlanner(button.dataset.planner)));list.querySelectorAll('[data-delete]').forEach(button=>button.addEventListener('click',()=>{const planner=namedPlanners.find(item=>item.id===button.dataset.delete);if(!planner||!confirm(`刪除行程冊「${planner.title}」？\n其中已排入的內容也會一併刪除。`))return;const key=plannerItemsKey(planner.id);localStorage.removeItem(key);localStorage.removeItem(`${key}.backups`);namedPlanners=namedPlanners.filter(item=>item.id!==planner.id);saveNamedPlanners();if(activePlannerId===planner.id){activePlannerId='weekly';localStorage.setItem(ACTIVE_PLANNER_KEY,'weekly');loadPlannerItems();renderWeek()}renderPlannerLibrary();showToast('已刪除行程冊')}))};
     const openPlannerLibrary=()=>{renderPlannerLibrary();plannerDialog.showModal();setTimeout(()=>document.querySelector('#planner-name').focus(),0)};
 
@@ -178,8 +203,16 @@
     document.querySelector('#create').addEventListener('submit',event=>{event.preventDefault();const title=document.querySelector('#new-title'),duration=document.querySelector('#new-duration');customTasks.unshift({id:nextId(),title:title.value.trim(),category:'生活',duration:durationMinutes(Number(duration.value)*60),stamina:0,focus:0,will:0});saveCustomTasks();title.value='';renderQuestTray();showToast('已加入未排程行程')});
     addEventListener('storage',event=>{if([QUEST_KEY,PLANNER_KEY,CUSTOM_KEY,NAMED_PLANNERS_KEY,ACTIVE_PLANNER_KEY,CATEGORY_KEY,COLOR_KEY].includes(event.key)||event.key?.startsWith(NAMED_PLANNER_ITEMS_PREFIX)){customTasks=readArray(CUSTOM_KEY);loadCalendarOptions();namedPlanners=readArray(NAMED_PLANNERS_KEY).filter(item=>item&&item.id&&item.title);activePlannerId=localStorage.getItem(ACTIVE_PLANNER_KEY)||'weekly';if(activePlannerId!=='weekly'&&!namedPlanners.some(item=>item.id===activePlannerId))activePlannerId='weekly';loadPlannerItems();renderWeek()}});
     migrateNamedPlannerItems();
+    await initializeCloudSync();
     loadPlannerItems();
     renderWeek();
+    addEventListener('focus',refreshCloudState);
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')refreshCloudState()});
+  })().catch(error=>{
+    console.error('Calendar startup failed',error);
+    const status=document.querySelector('#autosave-status');
+    if(status){status.classList.remove('saving');status.textContent='⚠ 啟動失敗'}
+  });
   </script>
 </body>
 </html>
