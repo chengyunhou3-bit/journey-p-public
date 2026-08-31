@@ -72,7 +72,7 @@
   (async()=>{
     const supabaseClient=window.supabase.createClient('https://aevoxzippmtipliacssb.supabase.co','sb_publishable_w39rFG2ut8KrRgtVaIgJtA_FpXj7rkV',{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false,flowType:'pkce'}});
     const{data:{user},error:userError}=await supabaseClient.auth.getUser();
-    if(userError||!user){location.replace('app.html');throw userError||new Error('尚未登入')}
+    if(userError||!user){location.replace('app.html');return}
     const activeUserId=user.id;
     sessionStorage.setItem('journeyP.activeUserId',activeUserId);
     const scopedKey=suffix=>`journeyP.${activeUserId}.${suffix}`;
